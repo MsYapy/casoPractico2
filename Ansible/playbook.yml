@@ -6,7 +6,7 @@
   vars:
     acr_login_server: "devopsyapy.azurecr.io"
     acr_username: "devopsyapy"
-    acr_password: "9OjzkhYtclAckTEYG1EVCmVBRxmX9Ii2u2DDdFQ6fm6dom0qwVq7JQQJ99CCAC8vTInEqg7NAAACAZCRYwc0"
+    acr_password: "***"
     source_image: "docker.io/library/nginx:latest"
     acr_image: "devopsyapy.azurecr.io/nginx:casopractico2"
   
