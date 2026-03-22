@@ -145,3 +145,23 @@ chmod +x deploy.sh
 - `Ansible/` - Configuración de la VM (Podman, NGINX)
 - `deploy.sh` - Script de despliegue automatizado
 - `destroy.sh` - Script para eliminar recursos
+
+
+## Licencia
+
+Este proyecto está bajo la licencia **MIT**.
+
+### Permisos
+- ✅ Uso comercial
+- ✅ Modificación
+- ✅ Distribución
+- ✅ Uso privado
+
+### Restricciones
+- ❌ Sin garantía
+- ❌ Sin responsabilidad del autor
+
+### Condiciones
+- Incluir el aviso de copyright y licencia en todas las copias
+
+Ver archivo [LICENSE](LICENSE) para más detalles.
