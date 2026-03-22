@@ -1,0 +1,156 @@
+---
+- name: Configurar VM con Podman, NGINX HTTPS y App Node.js + Redis
+  hosts: webservers
+  become: yes
+  
+  vars:
+    acr_login_server: "{{ acr_server }}"
+    acr_username: "{{ acr_user }}"
+    acr_password: "{{ acr_pass }}"
+    nginx_https_image: "{{ acr_server }}/nginx-https:casopractico2"
+    nodejs_image: "{{ acr_server }}/nodejs-redis:casopractico2"
+    redis_image: "{{ acr_server }}/redis:casopractico2"
+  
+  tasks:
+    - name: Actualizar repositorios
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Instalar Podman
+      apt:
+        name: podman
+        state: present
+
+    - name: Login a Azure Container Registry
+      containers.podman.podman_login:
+        registry: "{{ acr_login_server }}"
+        username: "{{ acr_username }}"
+        password: "{{ acr_password }}"
+      no_log: true
+
+    # === NGINX HTTPS ===
+    - name: Detener contenedor NGINX existente
+      containers.podman.podman_container:
+        name: nginx-https
+        state: absent
+      ignore_errors: yes
+
+    - name: Crear y ejecutar contenedor NGINX HTTPS
+      containers.podman.podman_container:
+        name: nginx-https
+        image: "{{ nginx_https_image }}"
+        state: started
+        ports:
+          - "443:443"
+        restart_policy: always
+
+    # === REDIS con persistencia ===
+    - name: Crear directorio para datos de Redis
+      file:
+        path: /opt/redis-data
+        state: directory
+        mode: '0755'
+
+    - name: Detener contenedor Redis existente
+      containers.podman.podman_container:
+        name: redis
+        state: absent
+      ignore_errors: yes
+
+    - name: Crear y ejecutar contenedor Redis con persistencia
+      containers.podman.podman_container:
+        name: redis
+        image: "{{ redis_image }}"
+        state: started
+        ports:
+          - "6379:6379"
+        volume:
+          - "/opt/redis-data:/data:Z"
+        restart_policy: always
+
+    # === Node.js App ===
+    - name: Detener contenedor Node.js existente
+      containers.podman.podman_container:
+        name: nodejs-app
+        state: absent
+      ignore_errors: yes
+
+    - name: Crear y ejecutar contenedor Node.js
+      containers.podman.podman_container:
+        name: nodejs-app
+        image: "{{ nodejs_image }}"
+        state: started
+        ports:
+          - "3000:3000"
+        env:
+          REDIS_HOST: "{{ ansible_default_ipv4.address }}"
+          REDIS_PORT: "6379"
+        restart_policy: always
+
+    # === Servicios Systemd ===
+    - name: Crear servicio systemd para NGINX HTTPS
+      copy:
+        dest: /etc/systemd/system/podman-nginx-https.service
+        content: |
+          [Unit]
+          Description=Podman NGINX HTTPS Container
+          After=network.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/podman start -a nginx-https
+          ExecStop=/usr/bin/podman stop nginx-https
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Crear servicio systemd para Redis
+      copy:
+        dest: /etc/systemd/system/podman-redis.service
+        content: |
+          [Unit]
+          Description=Podman Redis Container
+          After=network.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/podman start -a redis
+          ExecStop=/usr/bin/podman stop redis
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Crear servicio systemd para Node.js
+      copy:
+        dest: /etc/systemd/system/podman-nodejs.service
+        content: |
+          [Unit]
+          Description=Podman Node.js Container
+          After=network.target podman-redis.service
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/podman start -a nodejs-app
+          ExecStop=/usr/bin/podman stop nodejs-app
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Recargar systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Habilitar servicios al inicio
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+      loop:
+        - podman-nginx-https
+        - podman-redis
+        - podman-nodejs
+
+    - name: Verificar servicios
+      debug:
+        msg: |
+          Servicios desplegados:
+          - NGINX HTTPS: https://{{ ansible_host }}
+          - Node.js API: http://{{ ansible_host }}:3000/items
+          - Redis: localhost:6379 (persistencia en /opt/redis-data)

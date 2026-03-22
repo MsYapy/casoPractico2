@@ -1,167 +1,210 @@
-# Azure VM con Podman y NGINX
-
-Infraestructura como código para desplegar una VM en Azure con Podman ejecutando NGINX desde Azure Container Registry.
+# Caso Práctico 2 - Despliegue en Azure
 
 ## Diagrama de Arquitectura
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                   AZURE CLOUD                                    │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                    Resource Group: rg-podman-nginx                       │    │
-│  │                                                                          │    │
-│  │   ┌──────────────────────────────────────────────────────────────────┐  │    │
-│  │   │                  Virtual Network: vnet-podman                     │  │    │
-│  │   │                      10.0.0.0/16                                  │  │    │
-│  │   │                                                                   │  │    │
-│  │   │   ┌──────────────────────────────────────────────────────────┐   │  │    │
-│  │   │   │              Subnet: subnet-podman                        │   │  │    │
-│  │   │   │                  10.0.1.0/24                              │   │  │    │
-│  │   │   │                                                           │   │  │    │
-│  │   │   │   ┌───────────────────────────────────────────────────┐  │   │  │    │
-│  │   │   │   │         VM: vm-podman-nginx (Ubuntu 24.04)        │  │   │  │    │
-│  │   │   │   │                Standard_D2s_v3                     │  │   │  │    │
-│  │   │   │   │                                                    │  │   │  │    │
-│  │   │   │   │   ┌────────────────────────────────────────────┐  │  │   │  │    │
-│  │   │   │   │   │              PODMAN                         │  │   │  │    │
-│  │   │   │   │   │   ┌────────────────────────────────────┐   │  │   │  │    │
-│  │   │   │   │   │   │     Container: nginx-webserver     │   │  │   │  │    │
-│  │   │   │   │   │   │  devopsyapy.azurecr.io/nginx:      │   │  │   │  │    │
-│  │   │   │   │   │   │         casopractico2              │   │  │   │  │    │
-│  │   │   │   │   │   │           :80 ←──────────────────────────────────┐    │
-│  │   │   │   │   │   └────────────────────────────────────┘   │  │   │  │    │
-│  │   │   │   │   └────────────────────────────────────────────┘  │   │  │    │
-│  │   │   │   └───────────────────────────────────────────────────┘  │   │  │    │
-│  │   │   │                          │                                │   │  │    │
-│  │   │   └──────────────────────────┼────────────────────────────────┘   │  │    │
-│  │   │                              │                                     │  │    │
-│  │   └──────────────────────────────┼─────────────────────────────────────┘  │    │
-│  │                                  │                                        │    │
-│  │   ┌──────────────────┐    ┌──────┴───────┐    ┌─────────────────────┐    │    │
-│  │   │  NSG: nsg-podman │    │  NIC: nic-   │    │  Public IP: pip-    │    │    │
-│  │   │       -vm        │◄───│  podman-vm   │◄───│    podman-vm        │    │    │
-│  │   │  ┌────────────┐  │    └──────────────┘    │   20.69.158.189     │    │    │
-│  │   │  │ SSH:22  ✓  │  │                        └──────────┬──────────┘    │    │
-│  │   │  │ HTTP:80 ✓  │  │                                   │               │    │
-│  │   │  └────────────┘  │                                   │               │    │
-│  │   └──────────────────┘                                   │               │    │
-│  │                                                          │               │    │
-│  └──────────────────────────────────────────────────────────┼───────────────┘    │
-│                                                             │                    │
-│  ┌──────────────────────────────────────┐                   │                    │
-│  │  Azure Container Registry (ACR)      │                   │                    │
-│  │  devopsyapy.azurecr.io               │                   │                    │
-│  │  └─ nginx:casopractico2              │                   │                    │
-│  └──────────────────────────────────────┘                   │                    │
-│                                                             │                    │
-└─────────────────────────────────────────────────────────────┼────────────────────┘
-                                                              │
-                    ┌─────────────────────────────────────────┘
-                    │
-                    ▼
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│                              LOCAL (WSL)                                          │
-│                                                                                   │
-│   ┌─────────────┐         ┌─────────────┐         ┌─────────────────────────┐    │
-│   │  Terraform  │────────►│   Azure     │────────►│  Crea infraestructura   │    │
-│   │             │         │   API       │         │  (VM, VNet, NSG, etc.)  │    │
-│   └─────────────┘         └─────────────┘         └─────────────────────────┘    │
-│                                                                                   │
-│   ┌─────────────┐         ┌─────────────┐         ┌─────────────────────────┐    │
-│   │   Ansible   │────────►│    SSH      │────────►│  Configura VM:          │    │
-│   │             │         │  :22        │         │  - Instala Podman       │    │
-│   └─────────────┘         └─────────────┘         │  - Pull imagen ACR      │    │
-│                                                   │  - Ejecuta contenedor   │    │
-│                                                   └─────────────────────────┘    │
-└───────────────────────────────────────────────────────────────────────────────────┘
-
-                    │
-                    │  HTTP :80
-                    ▼
-            ┌───────────────┐
-            │   Usuario     │
-            │   Navegador   │
-            │ http://IP:80  │
-            └───────────────┘
+│                              AZURE CLOUD                                         │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                    Resource Group: rg-podman-nginx                         │  │
+│  │                                                                            │  │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    Virtual Network: vnet-podman                      │  │  │
+│  │  │                        10.0.0.0/16                                   │  │  │
+│  │  │                                                                      │  │  │
+│  │  │  ┌─────────────────────┐                                            │  │  │
+│  │  │  │  Subnet: 10.0.1.0/24│                                            │  │  │
+│  │  │  │                     │                                            │  │  │
+│  │  │  │  ┌───────────────┐  │                                            │  │  │
+│  │  │  │  │  VM Linux     │  │                                            │  │  │
+│  │  │  │  │  Ubuntu 24.04 │  │                                            │  │  │
+│  │  │  │  │               │  │                                            │  │  │
+│  │  │  │  │  ┌─────────┐  │  │                                            │  │  │
+│  │  │  │  │  │ Podman  │  │  │                                            │  │  │
+│  │  │  │  │  │         │  │  │                                            │  │  │
+│  │  │  │  │  │ NGINX   │◄─┼──┼─── HTTPS :443 (Internet)                   │  │  │
+│  │  │  │  │  │ HTTPS   │  │  │    Certificado X.509 + htpasswd            │  │  │
+│  │  │  │  │  └─────────┘  │  │                                            │  │  │
+│  │  │  │  └───────────────┘  │                                            │  │  │
+│  │  │  └─────────────────────┘                                            │  │  │
+│  │  └─────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                            │  │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐  │  │
+│  │  │              Azure Kubernetes Service (AKS)                          │  │  │
+│  │  │              aks-casopractico2 (1 worker node)                       │  │  │
+│  │  │                                                                      │  │  │
+│  │  │  ┌─────────────────────────────────────────────────────────────┐    │  │  │
+│  │  │  │                 Namespace: casopractico2                     │    │  │  │
+│  │  │  │                                                              │    │  │  │
+│  │  │  │  ┌─────────────┐         ┌─────────────┐                    │    │  │  │
+│  │  │  │  │  Node.js    │         │   Redis     │                    │    │  │  │
+│  │  │  │  │  Frontend   │────────►│   Backend   │                    │    │  │  │
+│  │  │  │  │  :3000      │         │   :6379     │                    │    │  │  │
+│  │  │  │  └──────┬──────┘         └──────┬──────┘                    │    │  │  │
+│  │  │  │         │                       │                           │    │  │  │
+│  │  │  │         │                       ▼                           │    │  │  │
+│  │  │  │         │               ┌───────────────┐                   │    │  │  │
+│  │  │  │         │               │     PVC       │                   │    │  │  │
+│  │  │  │         │               │  managed-csi  │                   │    │  │  │
+│  │  │  │         │               │    1Gi        │                   │    │  │  │
+│  │  │  │         │               └───────────────┘                   │    │  │  │
+│  │  │  │         ▼                                                   │    │  │  │
+│  │  │  │  ┌─────────────┐                                            │    │  │  │
+│  │  │  │  │ LoadBalancer│◄─── HTTP :80 (Internet)                    │    │  │  │
+│  │  │  │  └─────────────┘                                            │    │  │  │
+│  │  │  └─────────────────────────────────────────────────────────────┘    │  │  │
+│  │  └─────────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                            │  │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐  │  │
+│  │  │           Azure Container Registry (ACR)                             │  │  │
+│  │  │           acrcp2xxxxxxxx.azurecr.io                                  │  │  │
+│  │  │                                                                      │  │  │
+│  │  │   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐    │  │  │
+│  │  │   │ nginx-https      │ │ nodejs-redis     │ │ redis            │    │  │  │
+│  │  │   │ :casopractico2   │ │ :casopractico2   │ │ :casopractico2   │    │  │  │
+│  │  │   └──────────────────┘ └──────────────────┘ └──────────────────┘    │  │  │
+│  │  └─────────────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Flujo de Despliegue
+## Diagrama de Flujo de Despliegue
 
 ```
-1. Terraform ──► Crea Resource Group, VNet, Subnet, NSG, Public IP, NIC, VM
-                          │
-2. Terraform ──► Genera clave SSH y guarda en ssh_key.pem
-                          │
-3. Terraform ──► Output: IP pública de la VM
-                          │
-4. Ansible   ──► Conecta por SSH a la VM
-                          │
-5. Ansible   ──► Instala Podman
-                          │
-6. Ansible   ──► Login a ACR (devopsyapy.azurecr.io)
-                          │
-7. Ansible   ──► Pull nginx de Docker Hub, tag y push a ACR
-                          │
-8. Ansible   ──► Ejecuta contenedor desde ACR en puerto 80
-                          │
-9. Usuario   ──► Accede a http://20.69.158.189
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Terraform  │────►│    ACR      │────►│   Ansible   │────►│    AKS      │
+│   init &    │     │   Imágenes  │     │   Podman    │     │  kubectl    │
+│   apply     │     │   push      │     │   config    │     │   apply     │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+      │                   │                   │                   │
+      ▼                   ▼                   ▼                   ▼
+ ┌─────────┐        ┌─────────┐        ┌─────────┐        ┌─────────┐
+ │ RG, VNet│        │ nginx   │        │ NGINX   │        │ Node.js │
+ │ VM, ACR │        │ nodejs  │        │ HTTPS   │        │ + Redis │
+ │ AKS     │        │ redis   │        │ :443    │        │ + PVC   │
+ └─────────┘        └─────────┘        └─────────┘        └─────────┘
 ```
 
-## Requisitos
+## Recursos Desplegados en Azure
 
-- Azure CLI autenticado (`az login`)
-- Terraform
-- Ansible
-- Azure Container Registry (ACR) existente
+| Recurso | Nombre | Descripción |
+|---------|--------|-------------|
+| Resource Group | rg-podman-nginx | Contenedor de todos los recursos |
+| Virtual Network | vnet-podman | Red virtual 10.0.0.0/16 |
+| Subnet | subnet-podman | Subred 10.0.1.0/24 |
+| VM Linux | vm-podman-nginx | Ubuntu 24.04 LTS con Podman |
+| Public IP | pip-podman-vm | IP pública para la VM |
+| NSG | nsg-podman-vm | Reglas: SSH(22), HTTP(80), HTTPS(443), Node.js(3000) |
+| ACR | acrcp2xxxxxxxx | Registro de contenedores privado |
+| AKS | aks-casopractico2 | Cluster Kubernetes (1 worker) |
 
-## Configuración
+## Descripción del Proceso de Despliegue
 
-1. Edita `Terraform/terraform.tfvars` con tu subscription_id
+### Requisitos Previos
+- Azure CLI instalado y autenticado
+- Terraform >= 1.0
+- Ansible >= 2.9 con colección `containers.podman`
+- Docker o Podman local para construir imágenes
+- kubectl
 
-2. Exporta las credenciales del ACR:
+### Paso 1: Infraestructura con Terraform
 ```bash
-export ACR_LOGIN_SERVER="tu-acr.azurecr.io"
-export ACR_USERNAME="tu-acr-username"
-export ACR_PASSWORD="tu-acr-password"
+cd Terraform
+terraform init
+terraform apply -auto-approve
 ```
+Crea: Resource Group, VNet, Subnet, VM, NSG, ACR, AKS
 
-## Despliegue
+### Paso 2: Construcción y Push de Imágenes
+```bash
+./build-push-images.sh
+```
+Construye y sube al ACR:
+- `nginx-https:casopractico2` - NGINX con SSL y autenticación
+- `nodejs-redis:casopractico2` - API Node.js
+- `redis:casopractico2` - Redis para persistencia
+
+### Paso 3: Configuración VM con Ansible
+```bash
+cd Ansible
+ansible-playbook -i inventory.ini playbook-podman-https.yml
+```
+Configura Podman y despliega NGINX HTTPS como servicio systemd
+
+### Paso 4: Despliegue en AKS
+```bash
+./deploy-aks.sh
+```
+Despliega en Kubernetes: Namespace, PVC, Redis, Node.js, Services
+
+## Descripción de las Aplicaciones
+
+### Aplicación 1: NGINX HTTPS (Podman en VM)
+- **Tecnología**: NGINX en contenedor Podman
+- **Puerto**: 443 (HTTPS)
+- **Seguridad**: 
+  - Certificado X.509 autofirmado (365 días)
+  - Autenticación básica htpasswd (usuario: admin, password: admin123)
+- **Gestión**: Servicio systemd (`podman-nginx-https.service`)
+- **Acceso**: `https://<VM_PUBLIC_IP>`
+
+### Aplicación 2: Node.js + Redis (AKS)
+- **Frontend**: API Node.js con endpoints REST
+  - `GET /items` - Lista todos los items
+  - `POST /items` - Guarda item y retorna lista completa
+  - `GET /health` - Health check
+- **Backend**: Redis con almacenamiento persistente (PVC 1Gi)
+- **Persistencia**: Azure Managed Disk via StorageClass `managed-csi`
+- **Acceso**: `http://<LOADBALANCER_IP>/items`
+
+## Comandos Útiles
 
 ```bash
-chmod +x deploy.sh
-./deploy.sh
+# Ver estado de la VM
+az vm show --resource-group rg-podman-nginx --name vm-podman-nginx --show-details
+
+# Ver pods en AKS
+kubectl get pods -n casopractico2
+
+# Ver IP del LoadBalancer
+kubectl get svc nodejs-service -n casopractico2
+
+# Probar API Node.js
+curl -X POST http://<LB_IP>/items -H "Content-Type: application/json" -d '{"item":"test"}'
+curl http://<LB_IP>/items
+
+# Probar NGINX HTTPS
+curl -k -u admin:admin123 https://<VM_IP>
+
+# Gestionar servicio NGINX en VM
+sudo systemctl status podman-nginx-https
+sudo systemctl restart podman-nginx-https
 ```
 
-## Destruir infraestructura
+## Estructura del Proyecto
 
-```bash
-./destroy.sh
 ```
-
-## Estructura
-
-- `Terraform/` - Infraestructura de Azure (VM, VNet, NSG, etc.)
-- `Ansible/` - Configuración de la VM (Podman, NGINX)
-- `deploy.sh` - Script de despliegue automatizado
-- `destroy.sh` - Script para eliminar recursos
-
-
-## Licencia
-
-Este proyecto está bajo la licencia **MIT**.
-
-### Permisos
-- ✅ Uso comercial
-- ✅ Modificación
-- ✅ Distribución
-- ✅ Uso privado
-
-### Restricciones
-- ❌ Sin garantía
-- ❌ Sin responsabilidad del autor
-
-### Condiciones
-- Incluir el aviso de copyright y licencia en todas las copias
-
-Ver archivo [LICENSE](LICENSE) para más detalles.
+.
+├── Terraform/
+│   ├── main.tf          # Provider y Resource Group
+│   ├── network.tf       # VNet, Subnet, Public IP, NIC
+│   ├── security.tf      # NSG con reglas
+│   ├── vm.tf            # VM Linux
+│   ├── acr.tf           # Azure Container Registry
+│   ├── aks.tf           # Azure Kubernetes Service
+│   └── vars.tf          # Variables
+├── Ansible/
+│   ├── inventory.ini    # Inventario de hosts
+│   └── playbook-podman-https.yml  # Playbook principal
+├── kubernetes/
+│   ├── namespace.yaml   # Namespace casopractico2
+│   ├── redis-pvc.yaml   # PersistentVolumeClaim
+│   ├── redis-deployment.yaml
+│   ├── redis-service.yaml
+│   ├── nodejs-deployment.yaml
+│   └── nodejs-service.yaml
+├── app-nodejs/          # Código fuente API Node.js
+├── app-nginx-https/     # Dockerfile NGINX con SSL
+├── build-push-images.sh # Script para construir imágenes
+└── deploy-aks.sh        # Script para desplegar en AKS
+```
