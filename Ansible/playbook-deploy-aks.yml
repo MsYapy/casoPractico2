@@ -1,0 +1,172 @@
+---
+- name: Desplegar aplicación Node.js + Redis en AKS
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  vars:
+    acr_server: "{{ lookup('env', 'ACR_SERVER') }}"
+    acr_user: "{{ lookup('env', 'ACR_USER') }}"
+    acr_pass: "{{ lookup('env', 'ACR_PASS') }}"
+    kubectl_path: "/usr/local/bin/kubectl"
+  
+  tasks:
+    - name: Verificar variables ACR
+      fail:
+        msg: "Debes exportar ACR_SERVER, ACR_USER y ACR_PASS"
+      when: acr_server == "" or acr_user == "" or acr_pass == ""
+
+    - name: Crear namespace
+      command: "{{ kubectl_path }} apply -f ../kubernetes/namespace.yaml"
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout or 'configured' in ns_result.stdout"
+
+    - name: Crear PVC para Redis
+      command: "{{ kubectl_path }} apply -f ../kubernetes/redis-pvc.yaml"
+      register: pvc_result
+      changed_when: "'created' in pvc_result.stdout or 'configured' in pvc_result.stdout"
+
+    - name: Crear deployment Redis (usando imagen pública)
+      shell: |
+        cat <<EOF | {{ kubectl_path }} apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: redis
+          namespace: casopractico2
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: redis
+          template:
+            metadata:
+              labels:
+                app: redis
+            spec:
+              containers:
+                - name: redis
+                  image: redis:alpine
+                  ports:
+                    - containerPort: 6379
+                  volumeMounts:
+                    - name: redis-data
+                      mountPath: /data
+                  command: ["redis-server", "--appendonly", "yes"]
+              volumes:
+                - name: redis-data
+                  persistentVolumeClaim:
+                    claimName: redis-pvc
+        EOF
+
+    - name: Crear servicio Redis
+      command: "{{ kubectl_path }} apply -f ../kubernetes/redis-service.yaml"
+      register: redis_svc_result
+      changed_when: "'created' in redis_svc_result.stdout or 'configured' in redis_svc_result.stdout"
+
+    - name: Crear deployment Node.js (usando imagen pública)
+      shell: |
+        cat <<EOF | {{ kubectl_path }} apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nodejs-app
+          namespace: casopractico2
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: nodejs-app
+          template:
+            metadata:
+              labels:
+                app: nodejs-app
+            spec:
+              containers:
+                - name: nodejs
+                  image: node:18-alpine
+                  ports:
+                    - containerPort: 3000
+                  env:
+                    - name: REDIS_HOST
+                      value: "redis-service"
+                    - name: REDIS_PORT
+                      value: "6379"
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      cat > /app/package.json << 'PKGJSON'
+                      {"name":"nodejs-redis-app","version":"1.0.0","dependencies":{"express":"^4.18.2","redis":"^4.6.12"}}
+                      PKGJSON
+                      cat > /app/server.js << 'SERVERJS'
+                      const express = require('express');
+                      const redis = require('redis');
+                      const app = express();
+                      app.use(express.json());
+                      const REDIS_HOST = process.env.REDIS_HOST || 'redis-service';
+                      const REDIS_PORT = process.env.REDIS_PORT || 6379;
+                      let client;
+                      async function connectRedis() {
+                        client = redis.createClient({ socket: { host: REDIS_HOST, port: REDIS_PORT } });
+                        client.on('error', (err) => console.log('Redis Error:', err));
+                        await client.connect();
+                        console.log('Connected to Redis');
+                      }
+                      app.get('/items', async (req, res) => {
+                        try {
+                          const items = await client.lRange('items', 0, -1);
+                          res.json({ items, count: items.length });
+                        } catch (err) { res.status(500).json({ error: err.message }); }
+                      });
+                      app.post('/items', async (req, res) => {
+                        try {
+                          const { item } = req.body;
+                          if (!item) return res.status(400).json({ error: 'Item required' });
+                          await client.rPush('items', item);
+                          const items = await client.lRange('items', 0, -1);
+                          res.json({ message: 'Item saved', items, count: items.length });
+                        } catch (err) { res.status(500).json({ error: err.message }); }
+                      });
+                      app.get('/health', (req, res) => res.json({ status: 'ok' }));
+                      app.get('/', (req, res) => res.json({ message: 'Node.js API running', endpoints: ['/items', '/health'] }));
+                      connectRedis().then(() => app.listen(3000, () => console.log('Server running on port 3000')));
+                      SERVERJS
+                      mkdir -p /app && cd /app && npm install && node server.js
+                  workingDir: /app
+        EOF
+
+    - name: Crear servicio Node.js LoadBalancer
+      command: "{{ kubectl_path }} apply -f ../kubernetes/nodejs-service.yaml"
+      register: nodejs_svc_result
+      changed_when: "'created' in nodejs_svc_result.stdout or 'configured' in nodejs_svc_result.stdout"
+
+    - name: Esperar a que Redis esté listo
+      command: "{{ kubectl_path }} wait --for=condition=ready pod -l app=redis -n casopractico2 --timeout=180s"
+      register: redis_wait
+      ignore_errors: yes
+
+    - name: Esperar a que Node.js esté listo
+      command: "{{ kubectl_path }} wait --for=condition=ready pod -l app=nodejs-app -n casopractico2 --timeout=180s"
+      register: nodejs_wait
+      ignore_errors: yes
+
+    - name: Obtener estado del despliegue
+      command: "{{ kubectl_path }} get all -n casopractico2"
+      register: deploy_status
+
+    - name: Mostrar estado
+      debug:
+        var: deploy_status.stdout_lines
+
+    - name: Obtener IP del LoadBalancer
+      command: "{{ kubectl_path }} get svc nodejs-service -n casopractico2 -o jsonpath='{.status.loadBalancer.ingress[0].ip}'"
+      register: lb_ip
+      until: lb_ip.stdout != ""
+      retries: 12
+      delay: 10
+      ignore_errors: yes
+
+    - name: Mostrar URL de acceso
+      debug:
+        msg: "API Node.js disponible en: http://{{ lb_ip.stdout }}/items"
+      when: lb_ip.stdout != ""

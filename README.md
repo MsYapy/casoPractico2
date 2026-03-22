@@ -38,7 +38,7 @@
 │  │  │  │                                                              │    │  │  │
 │  │  │  │  ┌─────────────┐         ┌─────────────┐                    │    │  │  │
 │  │  │  │  │  Node.js    │         │   Redis     │                    │    │  │  │
-│  │  │  │  │  Frontend   │────────►│   Backend   │                    │    │  │  │
+│  │  │  │  │  API        │────────►│   Backend   │                    │    │  │  │
 │  │  │  │  │  :3000      │         │   :6379     │                    │    │  │  │
 │  │  │  │  └──────┬──────┘         └──────┬──────┘                    │    │  │  │
 │  │  │  │         │                       │                           │    │  │  │
@@ -57,12 +57,7 @@
 │  │                                                                            │  │
 │  │  ┌─────────────────────────────────────────────────────────────────────┐  │  │
 │  │  │           Azure Container Registry (ACR)                             │  │  │
-│  │  │           acrcp2xxxxxxxx.azurecr.io                                  │  │  │
-│  │  │                                                                      │  │  │
-│  │  │   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐    │  │  │
-│  │  │   │ nginx-https      │ │ nodejs-redis     │ │ redis            │    │  │  │
-│  │  │   │ :casopractico2   │ │ :casopractico2   │ │ :casopractico2   │    │  │  │
-│  │  │   └──────────────────┘ └──────────────────┘ └──────────────────┘    │  │  │
+│  │  │           acrcp2xxxxxxxx.azurecr.io (opcional)                       │  │  │
 │  │  └─────────────────────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
@@ -71,18 +66,18 @@
 ## Diagrama de Flujo de Despliegue
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Terraform  │────►│    ACR      │────►│   Ansible   │────►│    AKS      │
-│   init &    │     │   Imágenes  │     │   Podman    │     │  kubectl    │
-│   apply     │     │   push      │     │   config    │     │   apply     │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-      │                   │                   │                   │
-      ▼                   ▼                   ▼                   ▼
- ┌─────────┐        ┌─────────┐        ┌─────────┐        ┌─────────┐
- │ RG, VNet│        │ nginx   │        │ NGINX   │        │ Node.js │
- │ VM, ACR │        │ nodejs  │        │ HTTPS   │        │ + Redis │
- │ AKS     │        │ redis   │        │ :443    │        │ + PVC   │
- └─────────┘        └─────────┘        └─────────┘        └─────────┘
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Terraform  │────►│   Ansible   │────►│   Ansible   │
+│   init &    │     │   VM +      │     │    AKS      │
+│   apply     │     │   Podman    │     │   Deploy    │
+└─────────────┘     └─────────────┘     └─────────────┘
+      │                   │                   │
+      ▼                   ▼                   ▼
+ ┌─────────┐        ┌─────────┐        ┌─────────┐
+ │ RG, VNet│        │ NGINX   │        │ Node.js │
+ │ VM, ACR │        │ HTTPS   │        │ + Redis │
+ │ AKS     │        │ :443    │        │ + PVC   │
+ └─────────┘        └─────────┘        └─────────┘
 ```
 
 ## Recursos Desplegados en Azure
@@ -95,7 +90,7 @@
 | VM Linux | vm-podman-nginx | Ubuntu 24.04 LTS con Podman |
 | Public IP | pip-podman-vm | IP pública para la VM |
 | NSG | nsg-podman-vm | Reglas: SSH(22), HTTP(80), HTTPS(443), Node.js(3000) |
-| ACR | acrcp2xxxxxxxx | Registro de contenedores privado |
+| ACR | acrcp2xxxxxxxx | Registro de contenedores privado (opcional) |
 | AKS | aks-casopractico2 | Cluster Kubernetes (1 worker) |
 
 ## Descripción del Proceso de Despliegue
@@ -104,43 +99,57 @@
 - Azure CLI instalado y autenticado
 - Terraform >= 1.0
 - Ansible >= 2.9 con colección `containers.podman`
-- Docker o Podman local para construir imágenes
-- kubectl
+- kubectl (se instala con `az aks install-cli`)
 
 ### Paso 1: Infraestructura con Terraform
 ```bash
 cd Terraform
 terraform init
 terraform apply -auto-approve
-```
-Crea: Resource Group, VNet, Subnet, VM, NSG, ACR, AKS
 
-### Paso 2: Construcción y Push de Imágenes
+# Guardar clave SSH
+terraform output -raw private_key > ../ssh_key.pem
+cp ../ssh_key.pem ~/ssh_key.pem
+chmod 600 ~/ssh_key.pem
+
+# Actualizar inventario Ansible
+PUBLIC_IP=$(terraform output -raw public_ip)
+cat > ../Ansible/inventory.ini << EOF
+[webservers]
+${PUBLIC_IP} ansible_user=azureuser ansible_ssh_private_key_file=~/ssh_key.pem ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+EOF
+```
+
+### Paso 2: Configuración VM con Ansible (NGINX HTTPS)
 ```bash
-./build-push-images.sh
+cd ../Ansible
+ansible-playbook -i inventory.ini playbook-build-local.yml
 ```
-Construye y sube al ACR:
-- `nginx-https:casopractico2` - NGINX con SSL y autenticación
-- `nodejs-redis:casopractico2` - API Node.js
-- `redis:casopractico2` - Redis para persistencia
+Construye la imagen NGINX localmente en la VM con Podman y la ejecuta como servicio systemd.
 
-### Paso 3: Configuración VM con Ansible
+### Paso 3: Configurar kubectl
+```bash
+# Instalar kubectl
+sudo az aks install-cli
+
+# Obtener credenciales del AKS
+az aks get-credentials --resource-group rg-podman-nginx --name aks-casopractico2
+```
+
+### Paso 4: Despliegue en AKS con Ansible
 ```bash
 cd Ansible
-ansible-playbook -i inventory.ini playbook-podman-https.yml
+export ACR_SERVER="dummy"
+export ACR_USER="dummy"
+export ACR_PASS="dummy"
+ansible-playbook playbook-deploy-aks.yml
 ```
-Configura Podman y despliega NGINX HTTPS como servicio systemd
-
-### Paso 4: Despliegue en AKS
-```bash
-./deploy-aks.sh
-```
-Despliega en Kubernetes: Namespace, PVC, Redis, Node.js, Services
+Despliega Node.js + Redis en AKS usando imágenes públicas.
 
 ## Descripción de las Aplicaciones
 
 ### Aplicación 1: NGINX HTTPS (Podman en VM)
-- **Tecnología**: NGINX en contenedor Podman
+- **Tecnología**: NGINX en contenedor Podman (construido localmente)
 - **Puerto**: 443 (HTTPS)
 - **Seguridad**: 
   - Certificado X.509 autofirmado (365 días)
@@ -150,6 +159,7 @@ Despliega en Kubernetes: Namespace, PVC, Redis, Node.js, Services
 
 ### Aplicación 2: Node.js + Redis (AKS)
 - **Frontend**: API Node.js con endpoints REST
+  - `GET /` - Info de la API
   - `GET /items` - Lista todos los items
   - `POST /items` - Guarda item y retorna lista completa
   - `GET /health` - Health check
@@ -164,21 +174,26 @@ Despliega en Kubernetes: Namespace, PVC, Redis, Node.js, Services
 az vm show --resource-group rg-podman-nginx --name vm-podman-nginx --show-details
 
 # Ver pods en AKS
-kubectl get pods -n casopractico2
+/usr/local/bin/kubectl get pods -n casopractico2
 
 # Ver IP del LoadBalancer
-kubectl get svc nodejs-service -n casopractico2
+/usr/local/bin/kubectl get svc nodejs-service -n casopractico2
 
 # Probar API Node.js
-curl -X POST http://<LB_IP>/items -H "Content-Type: application/json" -d '{"item":"test"}'
 curl http://<LB_IP>/items
+curl -X POST http://<LB_IP>/items -H "Content-Type: application/json" -d '{"item":"test"}'
 
 # Probar NGINX HTTPS
 curl -k -u admin:admin123 https://<VM_IP>
 
 # Gestionar servicio NGINX en VM
+ssh -i ~/ssh_key.pem azureuser@<VM_IP>
 sudo systemctl status podman-nginx-https
 sudo systemctl restart podman-nginx-https
+
+# Eliminar recursos
+cd Terraform
+terraform destroy -auto-approve
 ```
 
 ## Estructura del Proyecto
@@ -194,17 +209,25 @@ sudo systemctl restart podman-nginx-https
 │   ├── aks.tf           # Azure Kubernetes Service
 │   └── vars.tf          # Variables
 ├── Ansible/
-│   ├── inventory.ini    # Inventario de hosts
-│   └── playbook-podman-https.yml  # Playbook principal
+│   ├── inventory.ini              # Inventario de hosts
+│   ├── playbook-build-local.yml   # Construye NGINX en VM
+│   └── playbook-deploy-aks.yml    # Despliega en AKS
 ├── kubernetes/
-│   ├── namespace.yaml   # Namespace casopractico2
-│   ├── redis-pvc.yaml   # PersistentVolumeClaim
+│   ├── namespace.yaml
+│   ├── redis-pvc.yaml
 │   ├── redis-deployment.yaml
 │   ├── redis-service.yaml
 │   ├── nodejs-deployment.yaml
 │   └── nodejs-service.yaml
 ├── app-nodejs/          # Código fuente API Node.js
 ├── app-nginx-https/     # Dockerfile NGINX con SSL
-├── build-push-images.sh # Script para construir imágenes
-└── deploy-aks.sh        # Script para desplegar en AKS
+└── PROBLEMAS-SOLUCIONADOS.txt  # Documentación de problemas
 ```
+
+## Problemas Comunes
+
+Ver el archivo `PROBLEMAS-SOLUCIONADOS.txt` para una lista detallada de problemas encontrados y sus soluciones, incluyendo:
+- Error de VM Size en AKS
+- Permisos de clave SSH en WSL
+- Configuración de registros en Podman
+- Instalación de kubectl en WSL
