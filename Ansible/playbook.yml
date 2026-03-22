@@ -1,0 +1,90 @@
+---
+- name: Configurar VM con Podman y NGINX desde ACR
+  hosts: webservers
+  become: yes
+  
+  vars:
+    acr_login_server: "devopsyapy.azurecr.io"
+    acr_username: "devopsyapy"
+    acr_password: "9OjzkhYtclAckTEYG1EVCmVBRxmX9Ii2u2DDdFQ6fm6dom0qwVq7JQQJ99CCAC8vTInEqg7NAAACAZCRYwc0"
+    source_image: "docker.io/library/nginx:latest"
+    acr_image: "devopsyapy.azurecr.io/nginx:casopractico2"
+  
+  tasks:
+    - name: Actualizar repositorios
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Instalar Podman
+      apt:
+        name: podman
+        state: present
+
+    - name: Verificar instalación de Podman
+      command: podman --version
+      register: podman_version
+      changed_when: false
+
+    - name: Mostrar versión de Podman
+      debug:
+        msg: "Podman instalado: {{ podman_version.stdout }}"
+
+    - name: Login a Azure Container Registry
+      containers.podman.podman_login:
+        registry: "{{ acr_login_server }}"
+        username: "{{ acr_username }}"
+        password: "{{ acr_password }}"
+      no_log: true
+
+    - name: Descargar imagen de NGINX desde Docker Hub
+      containers.podman.podman_image:
+        name: "{{ source_image }}"
+        state: present
+
+    - name: Etiquetar imagen para ACR
+      command: podman tag {{ source_image }} {{ acr_image }}
+      changed_when: true
+
+    - name: Subir imagen a Azure Container Registry
+      containers.podman.podman_image:
+        name: "{{ acr_image }}"
+        push: yes
+        state: present
+
+    - name: Detener contenedor existente si existe
+      containers.podman.podman_container:
+        name: nginx-webserver
+        state: absent
+      ignore_errors: yes
+
+    - name: Crear y ejecutar contenedor NGINX desde ACR
+      containers.podman.podman_container:
+        name: nginx-webserver
+        image: "{{ acr_image }}"
+        state: started
+        ports:
+          - "80:80"
+        restart_policy: always
+
+    - name: Verificar que el contenedor está corriendo
+      containers.podman.podman_container_info:
+        name: nginx-webserver
+      register: container_info
+
+    - name: Mostrar estado del contenedor
+      debug:
+        msg: "Contenedor NGINX desde ACR está {{ container_info.containers[0].State.Status }}"
+
+    - name: Verificar respuesta HTTP de NGINX
+      uri:
+        url: "http://localhost:80"
+        return_content: no
+      register: nginx_response
+      retries: 3
+      delay: 5
+      until: nginx_response.status == 200
+
+    - name: Confirmar despliegue exitoso
+      debug:
+        msg: "NGINX desde {{ acr_image }} respondiendo correctamente en puerto 80"
